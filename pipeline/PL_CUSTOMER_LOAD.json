@@ -14,13 +14,15 @@
 				"userProperties": [],
 				"typeProperties": {
 					"source": {
-						"type": "SnowflakeV2Source",
-						"query": {
-							"value": "SELECT * FROM EDW.ETL_CTRL.VW_PIPELINE_RUNTIME_CONFIG WHERE PIPELINE_NAME = '@{pipeline().parameters.config_pipeline_name}' AND ENV = '@{pipeline().parameters.env}'",
-							"type": "Expression"
-						},
-						"exportSettings": {
-							"type": "SnowflakeExportCopyCommand"
+						"type": "AzureSqlSource",
+						"queryTimeout": "02:00:00",
+						"partitionOption": "None"
+					},
+					"dataset": {
+						"referenceName": "DS_SQL_DB_Generic",
+						"type": "DatasetReference",
+						"parameters": {
+							"schemaName": "ETL_CNTRL"
 						}
 					},
 					"firstRowOnly": true
@@ -96,10 +98,7 @@
 				},
 				"userProperties": [],
 				"typeProperties": {
-					"fieldList": [
-						"exists",
-						"childItems"
-					]
+					"fieldList": []
 				}
 			},
 			{
@@ -150,7 +149,7 @@
 								"source": {
 									"type": "DelimitedTextSource",
 									"storeSettings": {
-										"type": "AzureBlobFSReadSettings",
+										"type": "AzureBlobStorageReadSettings",
 										"recursive": true,
 										"wildcardFolderPath": {
 											"value": "@replace(json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Copy_Customer_File.SRC_FOLDER_PATH, '{load_date}', variables('v_load_date'))",
@@ -160,25 +159,34 @@
 											"value": "@json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Copy_Customer_File.SRC_FILE_PATTERN",
 											"type": "Expression"
 										}
+									},
+									"formatSettings": {
+										"type": "DelimitedTextReadSettings"
 									}
 								},
 								"sink": {
 									"type": "AzureSqlSink",
-									"writeBehavior": "upsert",
-									"upsertSettings": {
-										"useTempDB": true,
-										"keys": {
-											"value": "@json(json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Copy_Customer_File.UPSERT_KEYS)",
-											"type": "Expression"
-										}
-									}
+									"writeBehavior": "insert",
+									"sqlWriterUseTableLock": false
 								},
 								"enableStaging": false,
 								"translator": {
 									"value": "@json(json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Copy_Customer_File.COLUMN_MAPPING_JSON)",
 									"type": "Expression"
 								}
-							}
+							},
+							"inputs": [
+								{
+									"referenceName": "DS_custmore_csv",
+									"type": "DatasetReference"
+								}
+							],
+							"outputs": [
+								{
+									"referenceName": "DS_SQL_DB_Customer",
+									"type": "DatasetReference"
+								}
+							]
 						},
 						{
 							"name": "SP_Merge_Customer",
@@ -218,6 +226,10 @@
 										"type": "Int64"
 									}
 								}
+							},
+							"linkedServiceName": {
+								"referenceName": "AzureSqlDatabase1",
+								"type": "LinkedServiceReference"
 							}
 						},
 						{
@@ -237,9 +249,13 @@
 							},
 							"userProperties": [],
 							"typeProperties": {
+								"dataset": {
+									"referenceName": "CSV_DS",
+									"type": "DatasetReference"
+								},
 								"enableLogging": false,
 								"storeSettings": {
-									"type": "AzureBlobFSReadSettings",
+									"type": "AzureBlobStorageReadSettings",
 									"recursive": true,
 									"wildcardFileName": {
 										"value": "@json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Delete_Processed.SRC_FILE_PATTERN",
@@ -283,25 +299,49 @@
 							"userProperties": [],
 							"typeProperties": {
 								"source": {
-									"type": "AzureSqlSource",
-									"sqlReaderQuery": {
-										"value": "@replace(item().SRC_QUERY, '{watermark}', string(activity('Lkp_Watermark').output.firstRow.MaxDate))",
-										"type": "Expression"
+									"type": "DelimitedTextSource",
+									"storeSettings": {
+										"type": "AzureBlobStorageReadSettings",
+										"recursive": true,
+										"enablePartitionDiscovery": false
 									},
-									"partitionOption": "None"
-								},
-								"sink": {
-									"type": "SnowflakeV2Sink",
-									"preCopyScript": {
-										"value": "@replace(item().PRE_SQL, '{load_date}', variables('v_load_date'))",
-										"type": "Expression"
-									},
-									"importSettings": {
-										"type": "SnowflakeImportCopyCommand"
+									"formatSettings": {
+										"type": "DelimitedTextReadSettings"
 									}
 								},
-								"enableStaging": false
-							}
+								"sink": {
+									"type": "DelimitedTextSink",
+									"storeSettings": {
+										"type": "AzureBlobStorageWriteSettings"
+									},
+									"formatSettings": {
+										"type": "DelimitedTextWriteSettings",
+										"quoteAllText": true,
+										"fileExtension": ".txt"
+									}
+								},
+								"enableStaging": false,
+								"translator": {
+									"type": "TabularTranslator",
+									"typeConversion": true,
+									"typeConversionSettings": {
+										"allowDataTruncation": true,
+										"treatBooleanAsNumber": false
+									}
+								}
+							},
+							"inputs": [
+								{
+									"referenceName": "ADLS_CSV_generic_dataset",
+									"type": "DatasetReference"
+								}
+							],
+							"outputs": [
+								{
+									"referenceName": "ADLS_CSV_generic_dataset",
+									"type": "DatasetReference"
+								}
+							]
 						},
 						{
 							"name": "Script_Audit",
@@ -319,6 +359,10 @@
 								"retryIntervalInSeconds": 30
 							},
 							"userProperties": [],
+							"linkedServiceName": {
+								"referenceName": "AzureSqlDatabase1",
+								"type": "LinkedServiceReference"
+							},
 							"typeProperties": {
 								"scripts": [
 									{
@@ -382,81 +426,40 @@
 				"userProperties": [],
 				"typeProperties": {
 					"source": {
-						"type": "SnowflakeV2Source",
-						"query": {
-							"value": "@json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Unload_Summary.SRC_QUERY",
-							"type": "Expression"
+						"type": "DelimitedTextSource",
+						"storeSettings": {
+							"type": "AzureBlobStorageReadSettings",
+							"recursive": true,
+							"enablePartitionDiscovery": false
 						},
-						"exportSettings": {
-							"type": "SnowflakeExportCopyCommand"
+						"formatSettings": {
+							"type": "DelimitedTextReadSettings"
 						}
 					},
 					"sink": {
-						"type": "DelimitedTextSink",
+						"type": "JsonSink",
 						"storeSettings": {
-							"type": "AzureBlobFSWriteSettings"
+							"type": "AzureBlobStorageWriteSettings",
+							"copyBehavior": "MergeFiles"
 						},
 						"formatSettings": {
-							"type": "DelimitedTextWriteSettings",
-							"quoteAllText": true,
-							"fileExtension": ".csv"
+							"type": "JsonWriteSettings"
 						}
 					},
 					"enableStaging": false
-				}
-			},
-			{
-				"name": "Run_DataFlow_Agg",
-				"type": "ExecuteDataFlow",
-				"dependsOn": [
+				},
+				"inputs": [
 					{
-						"activity": "ForEach_Tables",
-						"dependencyConditions": [
-							"Succeeded"
-						]
+						"referenceName": "ADLS_CSV_generic_dataset",
+						"type": "DatasetReference"
 					}
 				],
-				"policy": {
-					"retry": 1,
-					"retryIntervalInSeconds": 30
-				},
-				"userProperties": [],
-				"typeProperties": {
-					"compute": {
-						"coreCount": 8,
-						"computeType": "General"
-					},
-					"traceLevel": "Fine"
-				}
-			},
-			{
-				"name": "Execute_Notify",
-				"type": "ExecutePipeline",
-				"dependsOn": [
+				"outputs": [
 					{
-						"activity": "Unload_Summary",
-						"dependencyConditions": [
-							"Completed"
-						]
+						"referenceName": "ADLS_json_DS",
+						"type": "DatasetReference"
 					}
-				],
-				"policy": {
-					"secureInput": false
-				},
-				"userProperties": [],
-				"typeProperties": {
-					"waitOnCompletion": true,
-					"parameters": {
-						"run_date": {
-							"value": "@variables('v_load_date')",
-							"type": "Expression"
-						},
-						"parent_run_id": {
-							"value": "@pipeline().RunId",
-							"type": "Expression"
-						}
-					}
-				}
+				]
 			}
 		],
 		"concurrency": 1,
