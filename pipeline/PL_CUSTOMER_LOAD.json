@@ -1,0 +1,487 @@
+{
+	"name": "PL_CUSTOMER_LOAD",
+	"properties": {
+		"activities": [
+			{
+				"name": "Lkp_Config",
+				"type": "Lookup",
+				"dependsOn": [],
+				"policy": {
+					"timeout": "0.00:10:00",
+					"retry": 2,
+					"retryIntervalInSeconds": 30
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "SnowflakeV2Source",
+						"query": {
+							"value": "SELECT * FROM EDW.ETL_CTRL.VW_PIPELINE_RUNTIME_CONFIG WHERE PIPELINE_NAME = '@{pipeline().parameters.config_pipeline_name}' AND ENV = '@{pipeline().parameters.env}'",
+							"type": "Expression"
+						},
+						"exportSettings": {
+							"type": "SnowflakeExportCopyCommand"
+						}
+					},
+					"firstRowOnly": true
+				}
+			},
+			{
+				"name": "Set_LoadDate",
+				"type": "SetVariable",
+				"dependsOn": [
+					{
+						"activity": "Lkp_Config",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "v_load_date",
+					"value": {
+						"value": "@if(empty(pipeline().parameters.load_date), if(empty(activity('Lkp_Config').output.firstRow.LOAD_DATE_OVERRIDE), formatDateTime(convertFromUtc(utcnow(), activity('Lkp_Config').output.firstRow.LOAD_DATE_TZ_ADF), activity('Lkp_Config').output.firstRow.LOAD_DATE_FORMAT_ADF), activity('Lkp_Config').output.firstRow.LOAD_DATE_OVERRIDE), pipeline().parameters.load_date)",
+						"type": "Expression"
+					}
+				}
+			},
+			{
+				"name": "Lkp_Watermark",
+				"type": "Lookup",
+				"dependsOn": [
+					{
+						"activity": "Set_LoadDate",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "0.00:10:00",
+					"retry": 2,
+					"retryIntervalInSeconds": 60
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzureSqlSource",
+						"sqlReaderQuery": {
+							"value": "@json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Lkp_Watermark.SRC_QUERY",
+							"type": "Expression"
+						},
+						"partitionOption": "None"
+					},
+					"firstRowOnly": true
+				}
+			},
+			{
+				"name": "GetMeta_Landing",
+				"type": "GetMetadata",
+				"dependsOn": [
+					{
+						"activity": "Lkp_Watermark",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"retry": 1,
+					"retryIntervalInSeconds": 30
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"fieldList": [
+						"exists",
+						"childItems"
+					]
+				}
+			},
+			{
+				"name": "If_FilesExist",
+				"type": "IfCondition",
+				"dependsOn": [
+					{
+						"activity": "GetMeta_Landing",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"expression": {
+						"value": "@and(activity('GetMeta_Landing').output.exists, greater(length(activity('GetMeta_Landing').output.childItems), 0))",
+						"type": "Expression"
+					},
+					"ifFalseActivities": [
+						{
+							"name": "Set_Status_NoFiles",
+							"type": "SetVariable",
+							"dependsOn": [],
+							"policy": {
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"variableName": "v_status",
+								"value": "NO_FILES"
+							}
+						}
+					],
+					"ifTrueActivities": [
+						{
+							"name": "Copy_Customer_File",
+							"type": "Copy",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.01:00:00",
+								"retry": 3,
+								"retryIntervalInSeconds": 30
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"source": {
+									"type": "DelimitedTextSource",
+									"storeSettings": {
+										"type": "AzureBlobFSReadSettings",
+										"recursive": true,
+										"wildcardFolderPath": {
+											"value": "@replace(json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Copy_Customer_File.SRC_FOLDER_PATH, '{load_date}', variables('v_load_date'))",
+											"type": "Expression"
+										},
+										"wildcardFileName": {
+											"value": "@json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Copy_Customer_File.SRC_FILE_PATTERN",
+											"type": "Expression"
+										}
+									}
+								},
+								"sink": {
+									"type": "AzureSqlSink",
+									"writeBehavior": "upsert",
+									"upsertSettings": {
+										"useTempDB": true,
+										"keys": {
+											"value": "@json(json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Copy_Customer_File.UPSERT_KEYS)",
+											"type": "Expression"
+										}
+									}
+								},
+								"enableStaging": false,
+								"translator": {
+									"value": "@json(json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Copy_Customer_File.COLUMN_MAPPING_JSON)",
+									"type": "Expression"
+								}
+							}
+						},
+						{
+							"name": "SP_Merge_Customer",
+							"type": "SqlServerStoredProcedure",
+							"dependsOn": [
+								{
+									"activity": "Copy_Customer_File",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"policy": {
+								"timeout": "0.00:30:00",
+								"retry": 2,
+								"retryIntervalInSeconds": 120
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"storedProcedureName": {
+									"value": "@json(activity('Lkp_Config').output.firstRow.TASKS_JSON).SP_Merge_Customer.PROC_NAME",
+									"type": "Expression"
+								},
+								"storedProcedureParameters": {
+									"LoadDate": {
+										"value": {
+											"value": "@variables('v_load_date')",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"RowsCopied": {
+										"value": {
+											"value": "@activity('Copy_Customer_File').output.rowsCopied",
+											"type": "Expression"
+										},
+										"type": "Int64"
+									}
+								}
+							}
+						},
+						{
+							"name": "Delete_Processed",
+							"type": "Delete",
+							"dependsOn": [
+								{
+									"activity": "SP_Merge_Customer",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"policy": {
+								"retry": 1,
+								"retryIntervalInSeconds": 30
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"enableLogging": false,
+								"storeSettings": {
+									"type": "AzureBlobFSReadSettings",
+									"recursive": true,
+									"wildcardFileName": {
+										"value": "@json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Delete_Processed.SRC_FILE_PATTERN",
+										"type": "Expression"
+									}
+								}
+							}
+						}
+					]
+				}
+			},
+			{
+				"name": "ForEach_Tables",
+				"type": "ForEach",
+				"dependsOn": [
+					{
+						"activity": "If_FilesExist",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@json(activity('Lkp_Config').output.firstRow.FOREACH_TABLES_JSON)",
+						"type": "Expression"
+					},
+					"isSequential": false,
+					"batchCount": 4,
+					"activities": [
+						{
+							"name": "Copy_Table",
+							"type": "Copy",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "0.02:00:00",
+								"retry": 3,
+								"retryIntervalInSeconds": 60
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"source": {
+									"type": "AzureSqlSource",
+									"sqlReaderQuery": {
+										"value": "@replace(item().SRC_QUERY, '{watermark}', string(activity('Lkp_Watermark').output.firstRow.MaxDate))",
+										"type": "Expression"
+									},
+									"partitionOption": "None"
+								},
+								"sink": {
+									"type": "SnowflakeV2Sink",
+									"preCopyScript": {
+										"value": "@replace(item().PRE_SQL, '{load_date}', variables('v_load_date'))",
+										"type": "Expression"
+									},
+									"importSettings": {
+										"type": "SnowflakeImportCopyCommand"
+									}
+								},
+								"enableStaging": false
+							}
+						},
+						{
+							"name": "Script_Audit",
+							"type": "Script",
+							"dependsOn": [
+								{
+									"activity": "Copy_Table",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"policy": {
+								"retry": 2,
+								"retryIntervalInSeconds": 30
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"scripts": [
+									{
+										"type": "NonQuery",
+										"text": {
+											"value": "@replace(replace(replace(item().POST_SQL, '{run_id}', pipeline().RunId), '{rows_copied}', string(activity('Copy_Table').output.rowsCopied)), '{load_date}', variables('v_load_date'))",
+											"type": "Expression"
+										}
+									}
+								]
+							}
+						}
+					]
+				}
+			},
+			{
+				"name": "Log_Failure",
+				"type": "Script",
+				"dependsOn": [
+					{
+						"activity": "ForEach_Tables",
+						"dependencyConditions": [
+							"Failed"
+						]
+					}
+				],
+				"policy": {
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"scripts": [
+						{
+							"type": "NonQuery",
+							"text": {
+								"value": "@replace(replace(json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Log_Failure.POST_SQL, '{run_id}', pipeline().RunId), '{pipeline_name}', pipeline().Pipeline)",
+								"type": "Expression"
+							}
+						}
+					]
+				}
+			},
+			{
+				"name": "Unload_Summary",
+				"type": "Copy",
+				"dependsOn": [
+					{
+						"activity": "ForEach_Tables",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"retry": 1,
+					"retryIntervalInSeconds": 30
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "SnowflakeV2Source",
+						"query": {
+							"value": "@json(activity('Lkp_Config').output.firstRow.TASKS_JSON).Unload_Summary.SRC_QUERY",
+							"type": "Expression"
+						},
+						"exportSettings": {
+							"type": "SnowflakeExportCopyCommand"
+						}
+					},
+					"sink": {
+						"type": "DelimitedTextSink",
+						"storeSettings": {
+							"type": "AzureBlobFSWriteSettings"
+						},
+						"formatSettings": {
+							"type": "DelimitedTextWriteSettings",
+							"quoteAllText": true,
+							"fileExtension": ".csv"
+						}
+					},
+					"enableStaging": false
+				}
+			},
+			{
+				"name": "Run_DataFlow_Agg",
+				"type": "ExecuteDataFlow",
+				"dependsOn": [
+					{
+						"activity": "ForEach_Tables",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"retry": 1,
+					"retryIntervalInSeconds": 30
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"compute": {
+						"coreCount": 8,
+						"computeType": "General"
+					},
+					"traceLevel": "Fine"
+				}
+			},
+			{
+				"name": "Execute_Notify",
+				"type": "ExecutePipeline",
+				"dependsOn": [
+					{
+						"activity": "Unload_Summary",
+						"dependencyConditions": [
+							"Completed"
+						]
+					}
+				],
+				"policy": {
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"waitOnCompletion": true,
+					"parameters": {
+						"run_date": {
+							"value": "@variables('v_load_date')",
+							"type": "Expression"
+						},
+						"parent_run_id": {
+							"value": "@pipeline().RunId",
+							"type": "Expression"
+						}
+					}
+				}
+			}
+		],
+		"concurrency": 1,
+		"parameters": {
+			"env": {
+				"type": "string",
+				"defaultValue": "PROD"
+			},
+			"load_date": {
+				"type": "string"
+			},
+			"config_pipeline_name": {
+				"type": "string",
+				"defaultValue": "PL_CUSTOMER_LOAD"
+			}
+		},
+		"variables": {
+			"v_load_date": {
+				"type": "String"
+			},
+			"v_status": {
+				"type": "String",
+				"defaultValue": "STARTED"
+			}
+		},
+		"annotations": []
+	}
+}
